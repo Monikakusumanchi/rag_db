@@ -15,4 +15,8 @@ google-genai
 google-generativeai
 agno
 langchain
+langgraph
 langchain_community
+streamlit
+requests
+oauth2client
