@@ -44,12 +44,10 @@ class MongoDBUtility(Toolkit):
         self.client = MongoClient(uri)
         self.db = self.client[db_name]
         self.register(self.query_mongodb)
-        self.register(self.list_collections)
         self.register(self.get_collection_schema)
         self.register(self.count_documents)
         self.register(self.find_documents)
         self.register(self.aggregate_documents)
-        self.register(self.date_tool)
 
     def query_mongodb(self, collection, filter_query=None, projection=None, limit=10):
         """Executes a MongoDB find() query."""
@@ -59,12 +57,7 @@ class MongoDBUtility(Toolkit):
         col = self.db[collection]
         cursor = col.find(filter_query or {}, projection).limit(limit)
         return (list(cursor))
-
-    def list_collections(self):
-        """Returns the list of collections in the database."""
-        collections= self.db.list_collection_names()
-        return  (collections)
-
+        
     def get_collection_schema(self, collection):
         """Returns schema-like information for a collection based on sampled documents."""
         col = self.db[collection]
@@ -73,6 +66,7 @@ class MongoDBUtility(Toolkit):
             return ({field: type(value).__name__ for field, value in sample.items()})
 
         return "No documents found in the collection."
+    
     def count_documents(self, collection: str, filter_query: Optional[Dict] = None) -> int:
         """Counts documents in a collection based on a filter query."""
         if not isinstance(filter_query, dict):
@@ -94,9 +88,5 @@ class MongoDBUtility(Toolkit):
         """Runs an aggregation pipeline on a MongoDB collection."""
         col = self.db[collection]
         return (list(col.aggregate(pipeline)))
-
-    def date_tool(self):
-        today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return today
 
     

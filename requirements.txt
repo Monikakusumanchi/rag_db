@@ -20,3 +20,5 @@ langchain_community
 streamlit
 requests
 oauth2client
+retrying
+graphviz

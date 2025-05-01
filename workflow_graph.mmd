@@ -1,0 +1,20 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	RAG_Node(RAG Node)
+	Schema_Node(Schema Node)
+	LLM_Node(LLM Node)
+	Execution_Node(Execution Node)
+	__end__([<p>__end__</p>]):::last
+	LLM_Node --> Execution_Node;
+	RAG_Node --> Schema_Node;
+	Schema_Node --> LLM_Node;
+	__start__ --> RAG_Node;
+	Execution_Node --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

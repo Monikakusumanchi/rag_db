@@ -4,7 +4,9 @@ import os
 import streamlit as st
 import asyncio
 
+
 load_dotenv()
+
 
 uri = os.getenv("uri")
 print(uri)
@@ -19,7 +21,6 @@ except Exception as e:
     mongo_connected = False
 
 print("Databases:", client.list_database_names())
-
 from pymongo.mongo_client import MongoClient
 import openai
 from datetime import datetime, timedelta
@@ -42,12 +43,15 @@ from tools.rag import RagToolkit
 import json
 from decimal import Decimal, getcontext
 
+
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+
 import json
 from decimal import Decimal, getcontext
+
 
 MODEL_PRICING = {
     # OpenAI Models (Example Pricing - VERIFY CURRENT PRICES)
@@ -68,71 +72,80 @@ MODEL_PRICING = {
     "text-embedding-3-large": {"input": Decimal("0.13"), "output": Decimal("0.00")},
 }
 
+
 def estimate_agno_run_cost(result):
+
 
     total_prompt_tokens = 0
     total_completion_tokens = 0
     estimated_cost = Decimal("0.00")
-    
-    # Set precision for Decimal calculations
-    getcontext().prec = 10 # Use sufficient precision
-
+   
+    getcontext().prec = 10 
     try:
         if not result or not hasattr(result, 'metrics') or not result.metrics:
             st.warning("Metrics not found in agent result. Cannot estimate cost.")
             return 0, 0, Decimal("0.00")
 
+
         metrics = result.metrics
-        # Sum tokens from the lists provided in the top-level metrics
-        # These lists usually represent tokens per agent LLM turn/interaction
         total_prompt_tokens = sum(metrics.get('prompt_tokens', [0]))
         total_completion_tokens = sum(metrics.get('completion_tokens', [0]))
-        
-        # --- Cost Calculation for the main Agent Model ---
-        primary_model = getattr(result, 'model', None) # Get model name used for the run
+       
+        primary_model = getattr(result, 'model', None)
         if primary_model and primary_model in MODEL_PRICING:
             pricing = MODEL_PRICING[primary_model]
             input_cost_mill = pricing.get('input', Decimal("0.00"))
             output_cost_mill = pricing.get('output', Decimal("0.00"))
 
+
             prompt_cost = (Decimal(total_prompt_tokens) / Decimal("1000000")) * input_cost_mill
             completion_cost = (Decimal(total_completion_tokens) / Decimal("1000000")) * output_cost_mill
-            
+           
             estimated_cost += prompt_cost + completion_cost
             print(f"Cost Estimation: Model={primary_model}, Prompt Tokens={total_prompt_tokens}, Completion Tokens={total_completion_tokens}")
             print(f"Cost Estimation: Prompt Cost=${prompt_cost:.6f}, Completion Cost=${completion_cost:.6f}")
 
+
         else:
             st.warning(f"Pricing not found for primary model '{primary_model}'. Cost calculation might be incomplete.")
+
 
         print(f"Total Estimated Cost (Agent + Reasoning - excluding internal tools): ${estimated_cost:.6f}")
         return total_prompt_tokens, total_completion_tokens, estimated_cost
 
+
     except Exception as e:
         st.error(f"Error during cost estimation: {e}")
-        traceback.print_exc() # Print full traceback to console for debugging
+        traceback.print_exc() 
         return 0, 0, Decimal("0.00")
 
+
 def run_agent():
+
 
     uri = os.getenv("uri")
     client = MongoClient(uri)
 
+
     agent = Agent(
-            model= OpenAIChat(id="gpt-4o-mini",temperature=0),
+            # model= OpenAIChat(id="gpt-4o-mini",temperature=0),
+            model = Gemini(id="gemini-1.5-flash", temperature=0),
             reasoning_model=Groq(id="deepseek-r1-distill-llama-70b", temperature=0),
 
-            tools = [MongoDBUtility(), ThinkingTools(), PandasTools(), RagToolkit()],
+
+            tools = [MongoDBUtility(uri=uri, db_name="Demo"), ThinkingTools(), PandasTools(), RagToolkit()],
             instructions="""
             You are an intelligent MongoDB assistant that dynamically constructs and executes queries based on user input. Follow these steps METICULOUSLY:
+
 
             1️⃣ **Schema Identification & Planning (MUST DO FIRST):**
                - Immediately use the `RagToolkit` with the original user query.
                - **Wait for the output** from `RagToolkit`. It will be a JSON string containing keys like `relevant_collection`, `relevant_fields`, `chain_of_thought`, and `reasoning`.
                - **Parse this JSON output.**
                - **CRITICAL:** Extract the `chain_of_thought` from the RAG tool's output. This is your **mandatory plan** for the subsequent steps.
-               - Also extract the `relevant_collection` and `relevant_fields`.
+               - Also extract the `relevant_collection` and `relevant_fields` also use `get_collection_schema` to get the datatypes of each fields as well.
                - If the RAG tool returns an error, or if `relevant_collection` or `chain_of_thought` is null/missing, state that you cannot proceed with planning the query due to missing schema information or RAG tool failure, explain the reason given in the 'reasoning' or 'error' field, and STOP.
+
 
             2️⃣ **Generate an Optimized Query (Based STRICTLY on RAG Plan):**
                - **Follow the step-by-step `chain_of_thought`** provided by the `RagToolkit` in Step 1 to construct the specific MongoDB query (or aggregation pipeline).
@@ -141,12 +154,14 @@ def run_agent():
                - Project *only* the `relevant_fields` identified in Step 1 (plus any other fields explicitly required by the `chain_of_thought` for filtering, aggregation, or sorting), avoiding `_id` unless specified in the plan or required.
                - If the `chain_of_thought` indicates aggregation, construct the aggregation pipeline as outlined.
 
+
             3️⃣ **Execute the Query (Based on RAG Plan & Generated Query):**
                - Determine the correct MongoDB tool to use based **BOTH** on the `chain_of_thought` from Step 1 and the query generated in Step 2:
                  - If the plan/query involves **counting** documents, use `CountDocumentsTool`.
                  - If the plan/query involves **retrieving multiple documents**, use `FindDocumentsTool`.
                  - If the plan/query involves **aggregation** (like averaging, grouping), use `AggregateDocumentsTool`.
                - Execute the precise query/pipeline generated in Step 2 using the chosen tool.
+
 
             4️⃣ **Return a Clear and Concise Response:**
                - **Show the final MongoDB query or aggregation pipeline** that you executed (the one generated in Step 2).
@@ -162,14 +177,17 @@ def run_agent():
                - Provide a **brief explanation** of the result in natural language.
                - If no results are found by the MongoDB query, state this clearly ("No matching documents found.").
 
+
             ---
             **Error Handling Notes:**
             - Prioritize the `RagToolkit` in Step 1. If it fails, do not attempt subsequent steps.
             - Handle potential errors during query execution (Step 3) gracefully. Report the error message from the tool.
             - Follow the Google Sheets saving logic and DataFrame fallback precisely as described in Step 4.
 
+
             ---
             **Example Snippets (Illustrative - actual execution depends on RAG output):**
+
 
             *Initial thought process for "List failed calls last week":*
             1. Call `RagToolkit` with "List failed calls last week".
@@ -179,25 +197,28 @@ def run_agent():
             5. Execute `FindDocumentsTool` with the built query.
             6. Process result: Parse list, try Google Sheets, fallback to DataFrame if needed, present results.
 
+
             ---
             Always use the collection and fields identified by `RagToolkit`. Do not invent schema elements. Ensure queries align with the plan from the RAG tool. Use the current date provided for relative date calculations ONLY IF the RAG plan requires it.
         """,
     show_tool_calls=True,
-    add_datetime_to_instructions=True, 
+    add_datetime_to_instructions=True,
     markdown=True,
 )
+
 
     return agent
 # agent = run_agent()
 # agent.print_response("List all failed calls in the last month", stream=True)
 
+
 def simulate_agno_response(prompt):
-    # Replace this with your actual API call to Agno
-    agent = run_agent()  #Calling it here it the fix so that agent will take instruction
+    agent = run_agent() 
     response = agent.print_response(prompt, stream=True)
     for char in response:
         yield char
         time.sleep(0.05)
+
 
 with st.sidebar:
     if mongo_connected:
@@ -222,17 +243,20 @@ with st.sidebar:
         ],
     )
 
-# Main App
+
 st.title("AI Copilot to Analyze your data")
+
 
 # Initialize session state for conversation history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+
 # Display existing messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+
 
 # Chat input
 if prompt := st.chat_input("Ask me anything about your data"):
@@ -240,18 +264,17 @@ if prompt := st.chat_input("Ask me anything about your data"):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Agent response
 
+    # Agent response
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         full_response = ""
         agent = run_agent()
-        # Generate response with error handling
         with st.spinner("Analyzing your question..."):
             result = agent.run(prompt)
         # --- Display Cost Estimation ---
         total_prompt_tokens, total_completion_tokens, estimated_cost = estimate_agno_run_cost(result)
-        
+       
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric(label="Prompt Tokens", value=f"{total_prompt_tokens:,}")
@@ -260,62 +283,64 @@ if prompt := st.chat_input("Ask me anything about your data"):
         with col3:
             st.metric(label="Estimated Cost (USD)", value=f"${estimated_cost:.6f}")
 
+
         st.caption("Note: Cost estimation is based on reported agent model tokens (e.g., GPT-4o-mini) and may exclude costs incurred *inside* custom tools like RAG/Embedding unless explicitly tracked and reported by the tool.")
-        st.markdown("---") # Separator
+        st.markdown("---")
 
-
-        # Option 1: Get the formatted string representation of each tool call
         formatted_calls = result.formatted_tool_calls
         print("Formatted Tool Calls:")
         for call in formatted_calls:
             print(f"- {call}")
-        # Option 2: Get the names of the tools executed
-        # This approach extracts the unique names of the tools that were invoked.
         tool_interactions = result.tools
-        tool_names_used = set() # Use a set to store unique names
+        tool_names_used = set() 
         if tool_interactions:
             for interaction in tool_interactions:
-                tool_names_used.add(interaction.get('tool_name')) # Safely get tool_name
+                tool_names_used.add(interaction.get('tool_name')) 
         print("\nUnique Tool Names Used:")
         if tool_names_used:
             for name in tool_names_used:
                 print(f"- {name}")
         else:
             print("- No tools were used.")
-        # Option 3: Get detailed information for each tool interaction
         print("\nDetailed Tool Interactions:")
         if tool_interactions:
             for i, interaction in enumerate(tool_interactions):
                 print(f"Interaction {i+1}:")
                 print(f"  Name: {interaction.get('tool_name')}")
                 print(f"  Args: {interaction.get('tool_args')}")
-                # print(f"  Result: {interaction.get('content')}") # Result can be long, print if needed
                 print("-" * 10)
         else:
             print("- No tool interactions occurred.")
-        # --- START: Display Tool Interactions ---
-        if result.tools: # Check if any tools were used
+        if result.tools: 
             with st.expander("🔍 Show Tool Interactions"):
-                st.markdown("---") # Separator
+                st.markdown("---") 
                 for i, interaction in enumerate(result.tools):
                     tool_name = interaction.get('tool_name', 'N/A')
                     tool_args = interaction.get('tool_args', {})
 
-                    # Format arguments nicely (convert dict to formatted string)
+
                     import json
                     try:
                         args_str = json.dumps(tool_args, indent=2)
-                    except TypeError: # Handle non-serializable args if necessary
+                    except TypeError: 
                         args_str = str(tool_args)
+
 
                     st.markdown(f"**Interaction {i+1}: {tool_name}**")
                     st.code(args_str, language='json')
-                    st.markdown("---") # Separator between interactions
+                    st.markdown("---") 
         print(result)
-        # Display assistant response
         st.markdown(result.content)
-        
+       
         st.session_state.messages.append({"role": "assistant", "content":result.content })
+
+
+
+
+
+
+
+
 
 
 
