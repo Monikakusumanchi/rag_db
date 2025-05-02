@@ -122,5 +122,185 @@ def process_question_with_rag_and_gemini(question: str):
         print(f"An error occurred: {e}")
         print(f"Error: {e}")
 
-prompt = "List all failed calls in the last 7 days."
-process_question_with_rag_and_gemini(prompt)
+# prompt = "List all failed calls in the last 7 days."
+# process_question_with_rag_and_gemini(prompt)
+from agno.agent import Agent
+from agno.tools import Toolkit
+from agno.models.google import Gemini
+from pymongo import MongoClient
+import os
+import time
+import json
+
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
+# MongoDB connection
+uri = os.getenv("uri")
+client = MongoClient(uri)
+
+# Define Tools
+class RagToolkit(Toolkit):
+    def __init__(self):
+        super().__init__(name="rag_toolkit")
+
+    def function_declarations(self):
+        return [
+            {
+                "name": "ragcot",
+                "parameters": {
+                    "properties": [
+                        {"name": "query", "type": "string"}
+                    ]
+                }
+            }
+        ]
+
+    def ragcot(self, query: str):
+        """Simulate RAG Node: Retrieve schema details."""
+
+        rag_toolkit = RagToolkit()
+        rag_response = rag_toolkit.ragcot(query)
+        identified_schema = rag_response.identified_schema
+        response= {
+            "chain_of_thought": identified_schema.chain_of_thought,
+            "relevant_collection": identified_schema.relevant_collection,
+            "relevant_fields": identified_schema.relevant_fields,
+        }
+        cost_metrics["RAG Node"]["time"] = time.time() - start_time
+        cost_metrics["RAG Node"]["api_calls"] += 1
+        cost_metrics["RAG Node"]["cost"] += 0.01
+        return response
+
+class SchemaToolkit(Toolkit):
+    def __init__(self):
+        super().__init__(name="schema_toolkit")
+
+    def function_declarations(self):
+        return [
+            {
+                "name": "get_collection_schema",
+                "parameters": {
+                    "properties": [
+                        {"name": "collection_name", "type": "string"}
+                    ]
+                }
+            }
+        ]
+
+    def get_collection_schema(self, collection_name: str):
+        """Simulate Schema Node: Retrieve collection schema."""
+        start_time = time.time()
+        db = client["Demo"]
+        collection = db[collection_name]
+        sample_document = collection.find_one()
+        schema = {field: type(value).__name__ for field, value in sample_document.items()} if sample_document else {}
+        cost_metrics["Schema Node"]["time"] = time.time() - start_time
+        cost_metrics["Schema Node"]["db_queries"] += 1
+        cost_metrics["Schema Node"]["cost"] += 0.000
+        return schema
+
+class LLMToolkit(Toolkit):
+    def __init__(self):
+        super().__init__(name="llm_toolkit")
+
+    def function_declarations(self):
+        return [
+            {
+                "name": "generate_query",
+                "parameters": {
+                    "properties": [
+                        {"name": "chain_of_thought", "type": "string"},
+                        {"name": "collection_schema", "type": "object"},
+                        {"name": "query_type", "type": "string"}
+                    ]
+                }
+            }
+        ]
+
+    def generate_query(self, chain_of_thought: str, collection_schema: dict, query_type: str):
+        """Simulate LLM Node: Generate MongoDB query."""
+        start_time = time.time()
+        # Simulate LLM response
+        query = {
+            "collection": "calls",
+            "pipeline": [
+                {"$group": {"_id": None, "average_duration": {"$avg": "$duration_minutes"}}}
+            ]
+        }
+        cost_metrics["LLM Node"]["time"] = time.time() - start_time
+        cost_metrics["LLM Node"]["api_calls"] += 1
+        cost_metrics["LLM Node"]["input_cost"] += 0.00015
+        cost_metrics["LLM Node"]["output_cost"] += 0.00060
+        cost_metrics["LLM Node"]["total_cost"] += 0.00075
+        return query
+
+class ExecutionToolkit(Toolkit):
+    def __init__(self):
+        super().__init__(name="execution_toolkit")
+
+    def function_declarations(self):
+        return [
+            {
+                "name": "execute_query",
+                "parameters": {
+                    "properties": [
+                        {"name": "collection", "type": "string"},
+                        {"name": "pipeline", "type": "array"}
+                    ]
+                }
+            }
+        ]
+
+    def execute_query(self, collection: str, pipeline: list):
+        """Simulate Execution Node: Execute the MongoDB query."""
+        start_time = time.time()
+        db = client["Demo"]
+        collection = db[collection]
+        results = list(collection.aggregate(pipeline))
+        cost_metrics["Execution Node"]["time"] = time.time() - start_time
+        cost_metrics["Execution Node"]["db_queries"] += 1
+        cost_metrics["Execution Node"]["cost"] += 0.000
+        return results
+
+# Define Cost Metrics
+cost_metrics = {
+    "RAG Node": {"time": 0, "api_calls": 0, "cost": 0},
+    "Schema Node": {"time": 0, "db_queries": 0, "cost": 0},
+    "LLM Node": {"time": 0, "api_calls": 0, "input_cost": 0, "output_cost": 0, "total_cost": 0},
+    "Execution Node": {"time": 0, "db_queries": 0, "cost": 0},
+}
+
+# Create Agent
+agent = Agent(
+    model=Gemini(id="gemini-1.5-flash"),
+    tools=[
+        RagToolkit(),
+        SchemaToolkit(),
+        LLMToolkit(),
+        ExecutionToolkit()
+    ],
+    instructions="""
+    You are an intelligent MongoDB assistant. Follow these steps:
+    1. Use the RAG Toolkit to retrieve schema details.
+    2. Use the Schema Toolkit to get the collection schema.
+    3. Use the LLM Toolkit to generate a MongoDB query.
+    4. Use the Execution Toolkit to execute the query and return results.
+    """,
+    show_tool_calls=True,
+    markdown=True,
+)
+
+# Run the Agent
+response = agent.run("What is the average call duration of the calls made by the agents?")
+print("Agent Response:", response)
+
+# Print Cost Metrics
+print("\nCost Metrics:")
+for node, metrics in cost_metrics.items():
+    print(f"{node}: {metrics}")
+
+# Calculate Total Cost
+total_cost = sum(metrics.get("cost", 0) + metrics.get("total_cost", 0) for metrics in cost_metrics.values())
+print(f"\nTotal Cost of Execution: ${total_cost:.6f}")

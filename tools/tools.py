@@ -14,6 +14,14 @@ import requests
 sheet_id =  os.getenv("sheet_id")
 uri = os.getenv("uri")
 
+from agno.models.groq import Groq
+from agno.agent import Agent, RunResponse
+from agno.models.google import Gemini
+from typing import List, Dict, Optional
+from pymongo import MongoClient
+
+uri = os.getenv("uri")
+
 class MongoDBUtility(Toolkit):
     def __init__(self, uri=uri, db_name="Demo"):
         """Initialize MongoDB connection."""
@@ -39,7 +47,6 @@ class MongoDBUtility(Toolkit):
             self.client = None
             self.db = None
             self.db_name = None
-            st.error(f"MongoDB Connection Failed: {e}") #Showed in UI
         self.uri = os.getenv("uri")  # Access URI from environment variable
         self.client = MongoClient(uri)
         self.db = self.client[db_name]
@@ -49,44 +56,43 @@ class MongoDBUtility(Toolkit):
         self.register(self.find_documents)
         self.register(self.aggregate_documents)
 
-    def query_mongodb(self, collection, filter_query=None, projection=None, limit=10):
+    def query_mongodb(self, collection: str, filter_query: Optional[Dict] = None, projection: Optional[Dict] = None) -> List[Dict]:
         """Executes a MongoDB find() query."""
         if not isinstance(filter_query, dict):
             raise TypeError("Query must be a dictionary")
 
         col = self.db[collection]
-        cursor = col.find(filter_query or {}, projection).limit(limit)
-        return (list(cursor))
-        
-    def get_collection_schema(self, collection):
+        cursor = col.find(filter_query or {}, projection)
+        return list(cursor)
+
+    def get_collection_schema(self, collection: str) -> Dict[str, str]:
         """Returns schema-like information for a collection based on sampled documents."""
         col = self.db[collection]
         sample = col.find_one()
         if sample:
-            return ({field: type(value).__name__ for field, value in sample.items()})
+            return {field: type(value).__name__ for field, value in sample.items()}
 
-        return "No documents found in the collection."
-    
+        return {"message": "No documents found in the collection."}
+
     def count_documents(self, collection: str, filter_query: Optional[Dict] = None) -> int:
         """Counts documents in a collection based on a filter query."""
         if not isinstance(filter_query, dict):
             raise TypeError("Filter query must be a dictionary.")
 
         col = self.db[collection]
-        return str(col.count_documents(filter_query or {}))
+        return col.count_documents(filter_query or {})
 
-    def find_documents(self, collection: str, filter_query: Optional[Dict] = None, projection: Optional[Dict] = None, limit: int = 10) -> List[Dict]:
+    def find_documents(self, collection: str, filter_query: Optional[Dict] = None, projection: Optional[Dict] = None) -> List[Dict]:
         """Finds documents in a MongoDB collection."""
         if not isinstance(filter_query, dict):
             raise TypeError("Filter query must be a dictionary.")
 
         col = self.db[collection]
-        cursor = col.find(filter_query or {}, projection).limit(limit)
-        return (list(cursor))
+        cursor = col.find(filter_query or {}, projection)
+        return list(cursor)
 
     def aggregate_documents(self, collection: str, pipeline: List[Dict]) -> List[Dict]:
         """Runs an aggregation pipeline on a MongoDB collection."""
         col = self.db[collection]
-        return (list(col.aggregate(pipeline)))
-
+        return list(col.aggregate(pipeline))
     

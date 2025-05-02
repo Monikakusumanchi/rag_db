@@ -22,3 +22,4 @@ requests
 oauth2client
 retrying
 graphviz
+huggingface_hub

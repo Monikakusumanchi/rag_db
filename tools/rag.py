@@ -99,7 +99,6 @@ class IdentifiedSchema(BaseModel):
 
 
 class QueryResponse(BaseModel):
-    """Overall response structure for the /identify_collection_fields endpoint."""
     query: str
     identified_schema: IdentifiedSchema
     retrieved_schema_context: List[str]
@@ -107,11 +106,7 @@ class QueryResponse(BaseModel):
 
 @app.post("/upload_json/", tags=["Data Management"])
 async def upload_json(file: UploadFile = File(..., description="JSON file containing data for a new collection.")):
-    """
-    Uploads a JSON file. Each top-level key in the JSON becomes a collection,
-    or if the JSON is a list, the filename (without extension) becomes the collection name.
-    Data (list of documents) is inserted into the corresponding collection.
-    """
+
     try:
         table_name = os.path.splitext(file.filename)[0]
         contents = await file.read()
@@ -154,9 +149,7 @@ async def upload_json(file: UploadFile = File(..., description="JSON file contai
 
 @app.get("/extract_schema", tags=["Schema Management"])
 def extract_schema():
-    """
-    Extracts the schema (collection names and field names) from the MongoDB database.
-    """
+
     try:
         collections = db.list_collection_names()
         collections = [c for c in collections if not c.startswith('system.') and c != METADATA_EMBEDDINGS_COLLECTION]
@@ -195,11 +188,7 @@ def extract_schema():
 
 @app.post("/generate_schema_embeddings", tags=["Embeddings"])
 def generate_schema_embeddings():
-    """
-    Extracts the database schema, splits it into chunks, generates embeddings
-    for each chunk using OpenAI, and saves them to the MongoDB collection
-    specified by METADATA_EMBEDDINGS_COLLECTION.
-    """
+
     try:
         schema_data = extract_schema()
         collections_fields = schema_data.get("schema", {})
@@ -276,13 +265,6 @@ def generate_schema_embeddings():
 
 @app.post("/build_save_faiss_index", tags=["FAISS"])
 def build_save_faiss_index():
-    """
-    Loads schema embeddings from MongoDB (METADATA_EMBEDDINGS_COLLECTION),
-    builds a FAISS index, and saves the index and corresponding text chunks
-    to a pickle file (FAISS_INDEX_PATH). Overwrites existing file.
-    """
-
-
     try:
         embedding_collection = db[METADATA_EMBEDDINGS_COLLECTION]
         embeddings_data = list(embedding_collection.find({}, {"_id": 0, "embedding": 1, "chunk_text": 1}))
@@ -332,37 +314,16 @@ def build_save_faiss_index():
         print(f"Error in build_save_faiss_index: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to build/save FAISS index: {str(e)}")
 
-
-
-
-# @app.post("/identify_collection_fields", tags=["Query"], response_model=QueryResponse)
-# def identify_collection_fields(query: str = Query(..., description="User's natural language query about the data.")):
-#     """
-#     Takes a natural language query, finds relevant schema information using RAG,
-#     and asks an LLM to identify the MongoDB collection and fields needed to answer the query.
-#     Returns a structured response validated by Pydantic.
-#     """
 from agno.tools import Toolkit
 
 def parse_llm_response(raw_llm_text: str) -> dict:
-    """
-    Parses the raw LLM response text into a JSON object.
-
-    Args:
-        raw_llm_text (str): The raw response text from the LLM.
-
-    Returns:
-        dict: Parsed JSON object if successful, or an error structure if parsing fails.
-    """
     try:
-        # Clean the response text
         cleaned_response_text = raw_llm_text.strip()
         if cleaned_response_text.startswith("```json"):
             cleaned_response_text = cleaned_response_text[len("```json"):].strip()
         if cleaned_response_text.endswith("```"):
             cleaned_response_text = cleaned_response_text[:-len("```")].strip()
 
-        # Parse the cleaned response text into JSON
         llm_output_dict = json.loads(cleaned_response_text)
         print("Successfully parsed LLM JSON output.")
         return llm_output_dict
@@ -386,9 +347,9 @@ class RagToolkit(Toolkit):
     def __init__(self, FAISS_INDEX_PATH= "/faiss_metadata_index.pkl"):
         """Initialize Ragtoolkit connection."""
         super().__init__(name="rag_toolkit")
+        self.FAISS_INDEX_PATH = FAISS_INDEX_PATH
         self.register(self.ragcot)
-
-
+    
     def ragcot(self, query: str) -> QueryResponse:
         cost_metrics = {
             "embedding_cost": 0,
@@ -477,8 +438,8 @@ class RagToolkit(Toolkit):
             input_tokens = usage_metadata.prompt_token_count
             output_tokens = usage_metadata.candidates_token_count
 
-            input_cost = (input_tokens / 1_000_000) * 0.15  # $0.15 per million input tokens
-            output_cost = (output_tokens / 1_000_000) * 0.60  # $0.60 per million output tokens
+            input_cost = (input_tokens / 1_000_000) * 0.15 
+            output_cost = (output_tokens / 1_000_000) * 0.60  
             cost_metrics["llm_cost"] += input_cost + output_cost
             print(f"LLM Input Tokens: {input_tokens}, Output Tokens: {output_tokens}")
             print(f"LLM Cost: ${input_cost + output_cost:.6f}")
@@ -541,6 +502,92 @@ class RagToolkit(Toolkit):
                 identified_schema=identified_schema_obj,
                 retrieved_schema_context=[]
             )
+        
+# rag_toolkit = RagToolkit()
+# response = rag_toolkit.ragcot("What is the calls made by Amit verma last month?")
+# print("RagToolkit Response:", response)
+
+# from agno.models.openai import OpenAIChat
+# from agno.agent import Agent, RunResponse
+
+# agent = Agent(
+#             model = Gemini(id="gemini-1.5-flash",api_key=os.getenv("GOOGLE_API_KEY")),
+#             # model= OpenAIChat(id="gpt-4o-mini",temperature=0),
+
+#             # model=Groq(id="llama-3.1-8b-instant",temperature=0),
+#             tools = [rag_toolkit, MongoDBUtility(uri=uri, db_name="Demo")],
+#             instructions="""You are an intelligent MongoDB assistant that dynamically constructs and executes queries based on user input. Follow these steps METICULOUSLY:
+
+
+#             1️⃣ **Schema Identification & Planning (MUST DO FIRST):**
+#                - Immediately use the `rag_toolkit` with the original user query.
+#                - **Wait for the output** from `rag_toolkit`. It will be a JSON string containing keys like `relevant_collection`, `relevant_fields`, `chain_of_thought`, and `reasoning`.
+#                - **Parse this JSON output.**
+#                - **CRITICAL:** Extract the `chain_of_thought` from the RAG tool's output. This is your **mandatory plan** for the subsequent steps.
+#                - Also extract the `relevant_collection` and `relevant_fields` also use `get_collection_schema` to get the datatypes of each fields as well.
+#                - If the RAG tool returns an error, or if `relevant_collection` or `chain_of_thought` is null/missing, state that you cannot proceed with planning the query due to missing schema information or RAG tool failure, explain the reason given in the 'reasoning' or 'error' field, and STOP.
+
+
+#             2️⃣ **Generate an Optimized Query (Based STRICTLY on RAG Plan):**
+#                - **Follow the step-by-step `chain_of_thought`** provided by the `rag_toolkit` in Step 1 to construct the specific MongoDB query (or aggregation pipeline).
+#                - Use the `relevant_collection` from `identified in Step 1.
+#                - Implement filtering logic (`$eq`, `$gte`, `$regex`, etc.) exactly as described in the `chain_of_thought`.
+#                - Project *only* the `relevant_fields` identified in Step 1 (plus any other fields explicitly required by the `chain_of_thought` for filtering, aggregation, or sorting), avoiding `_id` unless specified in the plan or required.
+#                - If the `chain_of_thought` indicates aggregation, construct the aggregation pipeline as outlined.
+
+
+#             3️⃣ ** Must Execute the Query (Based on RAG Plan & Generated Query):**
+#                - Determine the correct MongoDB tool to use based **BOTH** on the `chain_of_thought` from Step 1 and the query generated in Step 2:
+#                  - If the plan/query involves **counting** documents, use `CountDocumentsTool` from `mongo_utility`.
+#                  - If the plan/query involves **retrieving multiple documents**, use `FindDocumentsTool` from `mongo_utility`.
+#                  - If the plan/query involves **aggregation** (like averaging, grouping), use `AggregateDocumentsTool` from `mongo_utility`.
+#                - Execute the precise query/pipeline generated in Step 2 using the chosen tool.
+
+
+#             4️⃣ **Return a Clear and Concise Response:**
+#                - **Show the final MongoDB query or aggregation pipeline** that you executed (the one generated in Step 2).
+#                - Present the result obtained from the MongoDB tool in Step 3.
+#                - **Format the output** clearly:
+#                  - If the result is a count or a single aggregation result (like average), state it directly.
+#                  - If the result is a list of documents (from `FindDocumentsTool`):
+#                      - Attempt to parse the string output from the tool into a Python list of dictionaries.
+#                      - **Try saving to Google Sheets first:** Use the appropriate tool (e.g., `save_to_google_sheets` from `PandasTools`) with the **parsed list of dictionaries**.
+#                      - **Google Sheets Fallback:** If saving to Google Sheets fails (tool returns an error, empty response, or indicates failure), convert the **original parsed list of dictionaries** into a Pandas DataFrame. Include the **string representation** of this DataFrame in your final output under a `dataframe` field. Also, explicitly state that saving to Google Sheets failed and you are providing the DataFrame instead.
+#                      - If saving to Google Sheets succeeds, state that.
+#                      - Also present the data in a readable format (e.g., formatted JSON snippet or a summary table description if too long).
+#                - Provide a **brief explanation** of the result in natural language.
+#                - If no results are found by the MongoDB query, state this clearly ("No matching documents found.").
+
+
+#             ---
+#             **Error Handling Notes:**
+#             - Prioritize the `RagToolkit` in Step 1. If it fails, do not attempt subsequent steps.
+#             - Handle potential errors during query execution (Step 3) gracefully. Report the error message from the tool.
+#             - Follow the Google Sheets saving logic and DataFrame fallback precisely as described in Step 4.
+
+
+#             ---
+#             **Example Snippets (Illustrative - actual execution depends on RAG output):**
+
+
+#             *Initial thought process for "List failed calls last week":*
+#             1. Call `RagToolkit` with "List failed calls last week".
+#             2. RAG Output (example): `{"relevant_collection": "calls", "relevant_fields": ["caller", "receiver", "timestamp", "status"], "chain_of_thought": "1. Filter 'calls' collection by status='failed'. 2. Filter by timestamp >= <start_of_last_week>. 3. Project caller, receiver, timestamp, status.", "reasoning": "Query asks for failed calls, schema has status and timestamp."}`
+#             3. Follow `chain_of_thought`: Build query `{"status": "failed", "timestamp": {"$gte": <date>}}` for collection `calls` with projection `{caller: 1, receiver: 1, timestamp: 1, status: 1, _id: 0}`.
+#             4. Plan indicates retrieving documents -> Use `FindDocumentsTool`.
+#             5. Execute `FindDocumentsTool` with the built query.
+#             6. Process result: Parse list, try Google Sheets, fallback to DataFrame if needed, present results.
+
+
+#             ---
+#             Always use the collection and fields identified by `RagToolkit`. Do not invent schema elements. Ensure queries align with the plan from the RAG tool. Use the current date provided for relative date calculations ONLY IF the RAG plan requires it.
+#         """,
+#     show_tool_calls=True,
+#     add_datetime_to_instructions=True,
+#     markdown=True,
+# )
+# # agent.print_response("list all the failed calls last 40 days?")  
+# agent.print_response("what is the average call duration of all the agents last two month?")
 #         #     identified_schema_obj: IdentifiedSchema
         #     try:
 

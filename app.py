@@ -30,7 +30,6 @@ from dotenv import load_dotenv
 import os
 from textwrap import dedent
 from agno.tools.thinking import ThinkingTools
-from agno.agent import Agent, RunResponse
 from agno.models.groq import Groq
 from agno.agent import Agent, RunResponse
 from agno.models.openai import OpenAIChat
@@ -42,7 +41,9 @@ import requests
 from tools.rag import RagToolkit
 import json
 from decimal import Decimal, getcontext
+from agno.models.google import Gemini
 
+from agno.agent import Agent, RunResponse
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -59,6 +60,8 @@ MODEL_PRICING = {
     "gpt-4o-mini": {"input": Decimal("0.15"), "output": Decimal("0.60")},
     "gpt-4-turbo": {"input": Decimal("10.00"), "output": Decimal("30.00")},
     "gpt-3.5-turbo-0125": {"input": Decimal("0.50"), "output": Decimal("1.50")},
+    "gemini-2.0-flash": {"input": Decimal("0.15"), "output": Decimal("0.60")},
+    "gemini-1.5-flash": {"input": Decimal("0.15"), "output": Decimal("0.60")},
     # Groq Models (Often free tier or very low cost - check their specifics)
     # Example: Assuming negligible cost for this demo if on free tier
     "llama3-8b-8192": {"input": Decimal("0.00"), "output": Decimal("0.00")},
@@ -73,52 +76,57 @@ MODEL_PRICING = {
 }
 
 
-def estimate_agno_run_cost(result):
-
-
+def calculate_cost_per_interaction(result):
+    """Calculate the cost for each interaction with the LLM."""
+    interaction_costs = []
     total_prompt_tokens = 0
     total_completion_tokens = 0
-    estimated_cost = Decimal("0.00")
-   
-    getcontext().prec = 10 
+    total_cost = Decimal("0.00")
+    getcontext().prec = 10  # Set precision for Decimal calculations
+
     try:
         if not result or not hasattr(result, 'metrics') or not result.metrics:
             st.warning("Metrics not found in agent result. Cannot estimate cost.")
-            return 0, 0, Decimal("0.00")
+            return [], 0, 0, Decimal("0.00")
 
-
+        # Extract metrics
         metrics = result.metrics
-        total_prompt_tokens = sum(metrics.get('prompt_tokens', [0]))
-        total_completion_tokens = sum(metrics.get('completion_tokens', [0]))
-       
+        input_tokens_list = metrics.get('input_tokens', [])
+        output_tokens_list = metrics.get('output_tokens', [])
         primary_model = getattr(result, 'model', None)
+
         if primary_model and primary_model in MODEL_PRICING:
             pricing = MODEL_PRICING[primary_model]
             input_cost_mill = pricing.get('input', Decimal("0.00"))
             output_cost_mill = pricing.get('output', Decimal("0.00"))
 
+            # Calculate cost for each interaction
+            for i, (input_tokens, output_tokens) in enumerate(zip(input_tokens_list, output_tokens_list)):
+                prompt_cost = (Decimal(input_tokens) / Decimal("1000000")) * input_cost_mill
+                completion_cost = (Decimal(output_tokens) / Decimal("1000000")) * output_cost_mill
+                interaction_cost = prompt_cost + completion_cost
 
-            prompt_cost = (Decimal(total_prompt_tokens) / Decimal("1000000")) * input_cost_mill
-            completion_cost = (Decimal(total_completion_tokens) / Decimal("1000000")) * output_cost_mill
-           
-            estimated_cost += prompt_cost + completion_cost
-            print(f"Cost Estimation: Model={primary_model}, Prompt Tokens={total_prompt_tokens}, Completion Tokens={total_completion_tokens}")
-            print(f"Cost Estimation: Prompt Cost=${prompt_cost:.6f}, Completion Cost=${completion_cost:.6f}")
+                interaction_costs.append({
+                    "interaction": i + 1,
+                    "prompt_tokens": input_tokens,
+                    "completion_tokens": output_tokens,
+                    "cost": interaction_cost
+                })
 
+                # Update totals
+                total_prompt_tokens += input_tokens
+                total_completion_tokens += output_tokens
+                total_cost += interaction_cost
 
         else:
             st.warning(f"Pricing not found for primary model '{primary_model}'. Cost calculation might be incomplete.")
 
-
-        print(f"Total Estimated Cost (Agent + Reasoning - excluding internal tools): ${estimated_cost:.6f}")
-        return total_prompt_tokens, total_completion_tokens, estimated_cost
-
+        return interaction_costs, total_prompt_tokens, total_completion_tokens, total_cost
 
     except Exception as e:
-        st.error(f"Error during cost estimation: {e}")
-        traceback.print_exc() 
-        return 0, 0, Decimal("0.00")
-
+        st.error(f"Error during cost calculation: {e}")
+        traceback.print_exc()
+        return [], 0, 0, Decimal("0.00")
 
 def run_agent():
 
@@ -126,14 +134,15 @@ def run_agent():
     uri = os.getenv("uri")
     client = MongoClient(uri)
 
-
+    rag_toolkit = RagToolkit()
+    # 
     agent = Agent(
             # model= OpenAIChat(id="gpt-4o-mini",temperature=0),
-            model = Gemini(id="gemini-1.5-flash", temperature=0),
-            reasoning_model=Groq(id="deepseek-r1-distill-llama-70b", temperature=0),
-
-
-            tools = [MongoDBUtility(uri=uri, db_name="Demo"), ThinkingTools(), PandasTools(), RagToolkit()],
+            model = Gemini(id="gemini-2.0-flash",api_key=os.getenv("GOOGLE_API_KEY")),
+            
+            # model=HuggingFace(id="distilbert-base-uncased", api_key=os.getenv("HUGGINGFACE_API_KEY"), temperature=0),           # model=Groq(id="llama-3.1-8b-instant",temperature=0),
+            # reasoning_model=Groq(id="deepseek-r1-distill-llama-70b", temperature=0),
+            tools = [MongoDBUtility(uri=uri, db_name="Demo"), rag_toolkit, PandasTools],
             instructions="""
             You are an intelligent MongoDB assistant that dynamically constructs and executes queries based on user input. Follow these steps METICULOUSLY:
 
@@ -143,8 +152,9 @@ def run_agent():
                - **Wait for the output** from `RagToolkit`. It will be a JSON string containing keys like `relevant_collection`, `relevant_fields`, `chain_of_thought`, and `reasoning`.
                - **Parse this JSON output.**
                - **CRITICAL:** Extract the `chain_of_thought` from the RAG tool's output. This is your **mandatory plan** for the subsequent steps.
-               - Also extract the `relevant_collection` and `relevant_fields` also use `get_collection_schema` to get the datatypes of each fields as well.
-               - If the RAG tool returns an error, or if `relevant_collection` or `chain_of_thought` is null/missing, state that you cannot proceed with planning the query due to missing schema information or RAG tool failure, explain the reason given in the 'reasoning' or 'error' field, and STOP.
+               - Also extract the `relevant_collection` and `relevant_fields`.
+               - Use the `get_collection_schema` tool to retrieve the schema of the `relevant_collection`. This will provide the datatypes and structure of the fields in the collection.
+               - If the RAG tool or `get_collection_schema` returns an error, or if `relevant_collection` or `chain_of_thought` is null/missing, state that you cannot proceed with planning the query due to missing schema information or tool failure, explain the reason given in the 'reasoning' or 'error' field, and STOP.
 
 
             2️⃣ **Generate an Optimized Query (Based STRICTLY on RAG Plan):**
@@ -163,20 +173,17 @@ def run_agent():
                - Execute the precise query/pipeline generated in Step 2 using the chosen tool.
 
 
-            4️⃣ **Return a Clear and Concise Response:**
-               - **Show the final MongoDB query or aggregation pipeline** that you executed (the one generated in Step 2).
-               - Present the result obtained from the MongoDB tool in Step 3.
-               - **Format the output** clearly:
-                 - If the result is a count or a single aggregation result (like average), state it directly.
-                 - If the result is a list of documents (from `FindDocumentsTool`):
-                     - Attempt to parse the string output from the tool into a Python list of dictionaries.
-                     - **Try saving to Google Sheets first:** Use the appropriate tool (e.g., `save_to_google_sheets` from `PandasTools`) with the **parsed list of dictionaries**.
-                     - **Google Sheets Fallback:** If saving to Google Sheets fails (tool returns an error, empty response, or indicates failure), convert the **original parsed list of dictionaries** into a Pandas DataFrame. Include the **string representation** of this DataFrame in your final output under a `dataframe` field. Also, explicitly state that saving to Google Sheets failed and you are providing the DataFrame instead.
-                     - If saving to Google Sheets succeeds, state that.
-                     - Also present the data in a readable format (e.g., formatted JSON snippet or a summary table description if too long).
-               - Provide a **brief explanation** of the result in natural language.
-               - If no results are found by the MongoDB query, state this clearly ("No matching documents found.").
-
+            4️⃣ **Return the Final Answer (MANDATORY):**
+           - Always return the final answer to the user based on the query results.
+           - **Show the final MongoDB query or aggregation pipeline** that you executed (the one generated in Step 2).
+           - Present the result obtained from the MongoDB tool in Step 3.
+           - **Format the output** clearly:
+             - If the result is a count or a single aggregation result (like average), state it directly.
+             - If the result is a list of documents (from `FindDocumentsTool`):
+                 - Parse the string output from the tool into a Python list of dictionaries.
+                 - Present the data in a readable format (e.g., formatted JSON snippet or a summary table description if too long).
+           - Provide a **brief explanation** of the result in natural language.
+           - If no results are found by the MongoDB query, state this clearly ("No matching documents found.").
 
             ---
             **Error Handling Notes:**
@@ -196,7 +203,7 @@ def run_agent():
             4. Plan indicates retrieving documents -> Use `FindDocumentsTool`.
             5. Execute `FindDocumentsTool` with the built query.
             6. Process result: Parse list, try Google Sheets, fallback to DataFrame if needed, present results.
-
+            **Make sure the agent runs the whole process
 
             ---
             Always use the collection and fields identified by `RagToolkit`. Do not invent schema elements. Ensure queries align with the plan from the RAG tool. Use the current date provided for relative date calculations ONLY IF the RAG plan requires it.
@@ -211,7 +218,7 @@ def run_agent():
 # agent = run_agent()
 # agent.print_response("List all failed calls in the last month", stream=True)
 
-
+import time
 def simulate_agno_response(prompt):
     agent = run_agent() 
     response = agent.print_response(prompt, stream=True)
@@ -272,20 +279,7 @@ if prompt := st.chat_input("Ask me anything about your data"):
         agent = run_agent()
         with st.spinner("Analyzing your question..."):
             result = agent.run(prompt)
-        # --- Display Cost Estimation ---
-        total_prompt_tokens, total_completion_tokens, estimated_cost = estimate_agno_run_cost(result)
-       
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric(label="Prompt Tokens", value=f"{total_prompt_tokens:,}")
-        with col2:
-            st.metric(label="Completion Tokens", value=f"{total_completion_tokens:,}")
-        with col3:
-            st.metric(label="Estimated Cost (USD)", value=f"${estimated_cost:.6f}")
-
-
-        st.caption("Note: Cost estimation is based on reported agent model tokens (e.g., GPT-4o-mini) and may exclude costs incurred *inside* custom tools like RAG/Embedding unless explicitly tracked and reported by the tool.")
-        st.markdown("---")
+        interaction_costs, total_prompt_tokens, total_completion_tokens, total_cost = calculate_cost_per_interaction(result)
 
         formatted_calls = result.formatted_tool_calls
         print("Formatted Tool Calls:")
@@ -330,8 +324,24 @@ if prompt := st.chat_input("Ask me anything about your data"):
                     st.code(args_str, language='json')
                     st.markdown("---") 
         print(result)
+                # --- Display Cost Per Interaction ---
+        st.markdown("### Cost and Tokens Per Interaction")
+        for interaction in interaction_costs:
+            st.markdown(f"**Interaction {interaction['interaction']}**")
+            st.write(f"Prompt Tokens: {interaction['prompt_tokens']}")
+            st.write(f"Completion Tokens: {interaction['completion_tokens']}")
+            st.write(f"Cost: ${interaction['cost']:.6f}")
+            st.markdown("---")
+
+        st.caption("Note: Cost estimation is based on reported agent model tokens (e.g., GPT-4o-mini) and may exclude costs incurred *inside* custom tools like RAG/Embedding unless explicitly tracked and reported by the tool.")
+        st.markdown("### Total Tokens and Cost")
+        st.write(f"**Total Prompt Tokens:** {total_prompt_tokens}")
+        st.write(f"**Total Completion Tokens:** {total_completion_tokens}")
+        st.write(f"**Total Cost (USD):** ${total_cost:.6f}")
+        st.markdown("---")
+        st.markdown("---")
         st.markdown(result.content)
-       
+
         st.session_state.messages.append({"role": "assistant", "content":result.content })
 
 
