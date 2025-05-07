@@ -3,10 +3,31 @@ from dotenv import load_dotenv
 import os
 import streamlit as st
 import asyncio
+from pymongo.mongo_client import MongoClient
+from datetime import datetime, timedelta
+from typing import Dict, Optional, List
+import pandas as pd
+from dotenv import load_dotenv
+from textwrap import dedent
+from agno.tools.thinking import ThinkingTools
+from agno.models.groq import Groq
+from agno.agent import Agent, RunResponse
+from agno.models.openai import OpenAIChat
+from agno.tools.pandas import PandasTools
 
+from agno.models.groq import Groq
+from tools.tools1 import MongoDBUtility
+from agno.models.google import Gemini
+from tools.rag import RagToolkit
+from tools.mcptool import MCPClient
+from decimal import Decimal, getcontext
+import streamlit as st
+import requests
+import json
+import traceback
+import time
 
 load_dotenv()
-
 
 uri = os.getenv("uri")
 print(uri)
@@ -21,38 +42,9 @@ except Exception as e:
     mongo_connected = False
 
 print("Databases:", client.list_database_names())
-from pymongo.mongo_client import MongoClient
-import openai
-from datetime import datetime, timedelta
-from typing import Dict, Optional, List
-import pandas as pd
-from dotenv import load_dotenv
-import os
-from textwrap import dedent
-from agno.tools.thinking import ThinkingTools
-from agno.models.groq import Groq
-from agno.agent import Agent, RunResponse
-from agno.models.openai import OpenAIChat
-from agno.tools.pandas import PandasTools
-from agno.models.groq import Groq
-from tools.tools import MongoDBUtility
-import streamlit as st
-import requests
-from tools.rag import RagToolkit
-import json
-from decimal import Decimal, getcontext
-from agno.models.google import Gemini
 
-from agno.agent import Agent, RunResponse
-
-load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-
-import json
-from decimal import Decimal, getcontext
-
 
 MODEL_PRICING = {
     # OpenAI Models (Example Pricing - VERIFY CURRENT PRICES)
@@ -63,18 +55,16 @@ MODEL_PRICING = {
     "gemini-2.0-flash": {"input": Decimal("0.15"), "output": Decimal("0.60")},
     "gemini-1.5-flash": {"input": Decimal("0.15"), "output": Decimal("0.60")},
     # Groq Models (Often free tier or very low cost - check their specifics)
-    # Example: Assuming negligible cost for this demo if on free tier
+    # Example: Assuming negligible cost for this callCrm if on free tier
     "llama3-8b-8192": {"input": Decimal("0.00"), "output": Decimal("0.00")},
     "llama3-70b-8192": {"input": Decimal("0.00"), "output": Decimal("0.00")},
     "mixtral-8x7b-32768": {"input": Decimal("0.00"), "output": Decimal("0.00")},
     # Add other models you might use (e.g., from Anthropic, Cohere)
-    # ...
     # --- Embedding Model Pricing (per Million Tokens) ---
     # Example: text-embedding-3-small (VERIFY CURRENT PRICE)
     "text-embedding-3-small": {"input": Decimal("0.02"), "output": Decimal("0.00")}, # Output cost usually N/A
     "text-embedding-3-large": {"input": Decimal("0.13"), "output": Decimal("0.00")},
 }
-
 
 def calculate_cost_per_interaction(result):
     """Calculate the cost for each interaction with the LLM."""
@@ -82,14 +72,12 @@ def calculate_cost_per_interaction(result):
     total_prompt_tokens = 0
     total_completion_tokens = 0
     total_cost = Decimal("0.00")
-    getcontext().prec = 10  # Set precision for Decimal calculations
-
+    getcontext().prec = 10  
     try:
         if not result or not hasattr(result, 'metrics') or not result.metrics:
             st.warning("Metrics not found in agent result. Cannot estimate cost.")
             return [], 0, 0, Decimal("0.00")
 
-        # Extract metrics
         metrics = result.metrics
         input_tokens_list = metrics.get('input_tokens', [])
         output_tokens_list = metrics.get('output_tokens', [])
@@ -100,7 +88,6 @@ def calculate_cost_per_interaction(result):
             input_cost_mill = pricing.get('input', Decimal("0.00"))
             output_cost_mill = pricing.get('output', Decimal("0.00"))
 
-            # Calculate cost for each interaction
             for i, (input_tokens, output_tokens) in enumerate(zip(input_tokens_list, output_tokens_list)):
                 prompt_cost = (Decimal(input_tokens) / Decimal("1000000")) * input_cost_mill
                 completion_cost = (Decimal(output_tokens) / Decimal("1000000")) * output_cost_mill
@@ -113,7 +100,6 @@ def calculate_cost_per_interaction(result):
                     "cost": interaction_cost
                 })
 
-                # Update totals
                 total_prompt_tokens += input_tokens
                 total_completion_tokens += output_tokens
                 total_cost += interaction_cost
@@ -127,10 +113,31 @@ def calculate_cost_per_interaction(result):
         st.error(f"Error during cost calculation: {e}")
         traceback.print_exc()
         return [], 0, 0, Decimal("0.00")
+    
+from agno.memory.v2.db.sqlite import SqliteMemoryDb
+from agno.memory.v2.memory import Memory, UserMemory
+from agno.storage.sqlite import SqliteStorage
+from rich.pretty import pprint
+# UserId for the memories
+# Database file for memory and storage
+db_file = "tmp/agent.db"
+# Initialize MCP Client
+mcp_client = MCPClient(
+    server_type="sse",  # Use "stdio" for local MongoDB
+    url="mongodb+srv://Admin:monikacrm@crm.e2i9tyo.mongodb.net/?retryWrites=true&w=majority&appName=CRM"
+)
+# Initialize memory.v2
+memory = Memory(
+    # Use any model for creating memories
+    model=Gemini(id="gemini-2.0-flash-exp"),
+    db=SqliteMemoryDb(table_name="user_memories", db_file=db_file),
+    delete_memories=True,
+    clear_memories=True,
+)
+
+storage = SqliteStorage(table_name="agent_sessions", db_file=db_file)
 
 def run_agent():
-
-
     uri = os.getenv("uri")
     client = MongoClient(uri)
 
@@ -142,83 +149,107 @@ def run_agent():
             
             # model=HuggingFace(id="distilbert-base-uncased", api_key=os.getenv("HUGGINGFACE_API_KEY"), temperature=0),           # model=Groq(id="llama-3.1-8b-instant",temperature=0),
             # reasoning_model=Groq(id="deepseek-r1-distill-llama-70b", temperature=0),
-            tools = [MongoDBUtility(uri=uri, db_name="Demo"), rag_toolkit, PandasTools],
+            tools = [MongoDBUtility(uri), rag_toolkit, PandasTools(), ThinkingTools(())],
             instructions="""
-            You are an intelligent MongoDB assistant that dynamically constructs and executes queries based on user input. Follow these steps METICULOUSLY:
+            You are an advanced AI assistant designed to help users analyze and manage their CRM data for Runo, a SIM-based Call Management CRM. Your primary goal is to assist users in querying and understanding their data, which includes call records, agent performance, company information, emails, and WhatsApp messages. Follow these steps meticulously to ensure accurate and insightful responses:
+
+                1️⃣ **Understand the User's Query:**
+                2️⃣ **Schema Identification & Planning:**
+                - Use the `RagToolkit` to analyze the query and retrieve relevant schema details, including `relevant_collection`, `relevant_fields`, and `chain_of_thought`.
+                - Extract the `chain_of_thought` to plan the query execution step-by-step.
+                - If schema details are missing or the RAG tool fails, explain the issue clearly and suggest alternative ways to proceed.
+
+                3️⃣ **Generate and Validate the Query:**
+                - Construct a MongoDB query or aggregation pipeline based on the `chain_of_thought` and schema details.
+                - Validate the query or pipeline to ensure it is properly formatted and includes all required arguments.
+                - Log the query or pipeline for debugging purposes.
+
+                4️⃣ **Execute the Query:**
+                - Use the appropriate tool like mcp_client to execute the query or pipeline.
+                - Handle errors gracefully and provide meaningful error messages to the user.
+
+                4️⃣ **Provide a Clear and Actionable Response:**
+                - Present the query results in a user-friendly format, such as a summary table, JSON snippet, or natural language explanation.
+                - For listing queries, ensure the results are displayed as a Pandas DataFrame or a similar tabular format for better readability.
+                - Highlight key insights, trends, or anomalies based on the data.
+
+                5️⃣ **Enable Sentiment Analysis or analysis of performance:**
+                - Analyze the sentiment of messages, emails, or WhatsApp conversations use think tool for that.
+                - Classify the sentiment as Positive, Negative, or Neutral.
+                - Provide a summary of the sentiment analysis, including the overall sentiment and key phrases contributing to the sentiment.
+                - Example:
+                    - "The sentiment of the messages is mostly positive, with key phrases like 'great service' and 'excellent support' contributing to this sentiment."
+
+                5️⃣ **Enable Follow-Up Questions:**
+                - Always include at least 2 follow-up questions based on the user's query and the data retrieved.
+                - Format follow-up questions under a section titled "Follow-Up Suggestions:" in the response.
+                - Example:
+                    Follow-Up Suggestions:
+                    - Would you like to filter these results further?
+                    - Do you want to compare this data with another time period or agent?
+
+                6️⃣ **Error Handling and Transparency:**
+                - If an error occurs during query execution, explain the issue clearly and provide suggestions to resolve it.
+                - Always show the MongoDB query or pipeline executed for transparency.
+                - If the query is too complex or the data is too large, suggest breaking it down into smaller parts.
+                7️⃣ **Data Privacy and Security:**        
+                - Ensure that sensitive data is handled appropriately and not exposed in the responses.
 
 
-            1️⃣ **Schema Identification & Planning (MUST DO FIRST):**
-               - Immediately use the `RagToolkit` with the original user query.
-               - **Wait for the output** from `RagToolkit`. It will be a JSON string containing keys like `relevant_collection`, `relevant_fields`, `chain_of_thought`, and `reasoning`.
-               - **Parse this JSON output.**
-               - **CRITICAL:** Extract the `chain_of_thought` from the RAG tool's output. This is your **mandatory plan** for the subsequent steps.
-               - Also extract the `relevant_collection` and `relevant_fields`.
-               - Use the `get_collection_schema` tool to retrieve the schema of the `relevant_collection`. This will provide the datatypes and structure of the fields in the collection.
-               - If the RAG tool or `get_collection_schema` returns an error, or if `relevant_collection` or `chain_of_thought` is null/missing, state that you cannot proceed with planning the query due to missing schema information or tool failure, explain the reason given in the 'reasoning' or 'error' field, and STOP.
+                7️⃣ **Advanced Query Support:**
+                - Handle complex queries involving multiple conditions, aggregations, or cross-referencing data (e.g., "Show me the average call duration for failed calls made by Priya Sharma last month").
+                - Use the current date for relative date calculations if required by the query.
 
+                8️⃣ **Interactive and Context-Aware Assistance:**
+                - Maintain context across multiple queries in a session to enable seamless follow-up questions.
+                - Use natural language to explain technical details when necessary.
 
-            2️⃣ **Generate an Optimized Query (Based STRICTLY on RAG Plan):**
-               - **Follow the step-by-step `chain_of_thought`** provided by the `RagToolkit` in Step 1 to construct the specific MongoDB query (or aggregation pipeline).
-               - Use the `relevant_collection` identified in Step 1.
-               - Implement filtering logic (`$eq`, `$gte`, `$regex`, etc.) exactly as described in the `chain_of_thought`.
-               - Project *only* the `relevant_fields` identified in Step 1 (plus any other fields explicitly required by the `chain_of_thought` for filtering, aggregation, or sorting), avoiding `_id` unless specified in the plan or required.
-               - If the `chain_of_thought` indicates aggregation, construct the aggregation pipeline as outlined.
+                ---
+                **Example Queries You Can Handle:**
+                - "List all calls made by Priya Sharma this week."
+                - "What is the average call duration for completed calls?"
+                - "How many WhatsApp messages were sent by agents last month?"
+                - "Show me the top 5 agents with the highest call success rate."
+                - "What is the total number of emails sent to clients this quarter?"
 
-
-            3️⃣ **Execute the Query (Based on RAG Plan & Generated Query):**
-               - Determine the correct MongoDB tool to use based **BOTH** on the `chain_of_thought` from Step 1 and the query generated in Step 2:
-                 - If the plan/query involves **counting** documents, use `CountDocumentsTool`.
-                 - If the plan/query involves **retrieving multiple documents**, use `FindDocumentsTool`.
-                 - If the plan/query involves **aggregation** (like averaging, grouping), use `AggregateDocumentsTool`.
-               - Execute the precise query/pipeline generated in Step 2 using the chosen tool.
-
-
-            4️⃣ **Return the Final Answer (MANDATORY):**
-           - Always return the final answer to the user based on the query results.
-           - **Show the final MongoDB query or aggregation pipeline** that you executed (the one generated in Step 2).
-           - Present the result obtained from the MongoDB tool in Step 3.
-           - **Format the output** clearly:
-             - If the result is a count or a single aggregation result (like average), state it directly.
-             - If the result is a list of documents (from `FindDocumentsTool`):
-                 - Parse the string output from the tool into a Python list of dictionaries.
-                 - Present the data in a readable format (e.g., formatted JSON snippet or a summary table description if too long).
-           - Provide a **brief explanation** of the result in natural language.
-           - If no results are found by the MongoDB query, state this clearly ("No matching documents found.").
-
-            ---
-            **Error Handling Notes:**
-            - Prioritize the `RagToolkit` in Step 1. If it fails, do not attempt subsequent steps.
-            - Handle potential errors during query execution (Step 3) gracefully. Report the error message from the tool.
-            - Follow the Google Sheets saving logic and DataFrame fallback precisely as described in Step 4.
-
-
-            ---
-            **Example Snippets (Illustrative - actual execution depends on RAG output):**
-
-
-            *Initial thought process for "List failed calls last week":*
-            1. Call `RagToolkit` with "List failed calls last week".
-            2. RAG Output (example): `{"relevant_collection": "calls", "relevant_fields": ["caller", "receiver", "timestamp", "status"], "chain_of_thought": "1. Filter 'calls' collection by status='failed'. 2. Filter by timestamp >= <start_of_last_week>. 3. Project caller, receiver, timestamp, status.", "reasoning": "Query asks for failed calls, schema has status and timestamp."}`
-            3. Follow `chain_of_thought`: Build query `{"status": "failed", "timestamp": {"$gte": <date>}}` for collection `calls` with projection `{caller: 1, receiver: 1, timestamp: 1, status: 1, _id: 0}`.
-            4. Plan indicates retrieving documents -> Use `FindDocumentsTool`.
-            5. Execute `FindDocumentsTool` with the built query.
-            6. Process result: Parse list, try Google Sheets, fallback to DataFrame if needed, present results.
-            **Make sure the agent runs the whole process
-
-            ---
-            Always use the collection and fields identified by `RagToolkit`. Do not invent schema elements. Ensure queries align with the plan from the RAG tool. Use the current date provided for relative date calculations ONLY IF the RAG plan requires it.
-        """,
+                **Follow-Up Suggestions:**
+                - "Would you like to filter these results further?"
+                - "Do you want to compare this data with another time period or agent?"
+                - "Would you like to export this data to a CSV or Google Sheet?"
+                **Important Notes:**
+                - Do not ask the user for in which collection they want to search. You should be able to identify the collection based on the query.
+                - If you dont know the answer to a question, say "I don't know" instead of making up an answer.
+                ---
+                Always aim to provide accurate, actionable, and insightful responses to help users make data-driven decisions.
+                """,
     show_tool_calls=True,
     add_datetime_to_instructions=True,
+    memory=memory,
+    # Give the Agent the ability to update memories
+    enable_agentic_memory=False,
+    # OR - Run the MemoryManager after each response
+    enable_user_memories=False,
+    # Store the chat history in the database
+    storage=storage,
+    # Add the chat history to the messages
+    add_history_to_messages=True,
+    # Number of history runs
+    num_history_runs=3,
     markdown=True,
 )
 
-
     return agent
-# agent = run_agent()
-# agent.print_response("List all failed calls in the last month", stream=True)
-
-import time
+# try:
+#     print("Initializing agent...")
+#     agent = run_agent()
+#     print("Agent initialized. Sending query...")
+#     agent.print_response("the number of calls each agent made with duration greater than 10 minutes?", stream=True)
+# except AttributeError as e:
+#     st.error("An error occurred while processing the response. Please try again.")
+#     print("AttributeError:", e)
+# except Exception as e:
+#     st.error(f"Unexpected error: {e}")
+#     print("Error details:", e)
 def simulate_agno_response(prompt):
     agent = run_agent() 
     response = agent.print_response(prompt, stream=True)
@@ -250,107 +281,118 @@ with st.sidebar:
         ],
     )
 
-
 st.title("AI Copilot to Analyze your data")
 
-
-# Initialize session state for conversation history
+## Initialize session state for conversation history and agent
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "agent" not in st.session_state:
+    st.session_state.agent = run_agent()  # Initialize the agent once and store it in session state
 
 # Display existing messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-
 # Chat input
+
 if prompt := st.chat_input("Ask me anything about your data"):
+    # Retrieve previous context from user memories
+    # Validate prompt
+    if not prompt.strip():
+        st.error("Prompt cannot be empty. Please enter a valid query.")
+        st.stop()
+    previous_context = memory.search_user_memories(
+        user_id="user_id",
+        query="Retrieve previous context",
+        retrieval_method="agentic",
+    )
+
+    # Add user input to session state
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-
 
     # Agent response
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         full_response = ""
-        agent = run_agent()
+        agent = st.session_state.agent  # Reuse the agent from session state
         with st.spinner("Analyzing your question..."):
-            result = agent.run(prompt)
+            result = agent.run(prompt, context=previous_context)
+
+        # Add the agent's response to user memory
+        memory.add_user_memory(
+            user_id="user_id",
+            memory=UserMemory(memory=result.content),
+        )
+
+        # Add the agent's response to session state
+        st.session_state.messages.append({"role": "assistant", "content": result.content})
+
+        # Display the agent's response
+        st.markdown(result.content)
+
+        # Calculate costs and tokens
         interaction_costs, total_prompt_tokens, total_completion_tokens, total_cost = calculate_cost_per_interaction(result)
 
-        formatted_calls = result.formatted_tool_calls
-        print("Formatted Tool Calls:")
-        for call in formatted_calls:
-            print(f"- {call}")
+        # Display Tool Interactions
+        print("result:==============================================", result)
+        st.markdown("### Tool Interactions")
         tool_interactions = result.tools
-        tool_names_used = set() 
-        if tool_interactions:
-            for interaction in tool_interactions:
-                tool_names_used.add(interaction.get('tool_name')) 
-        print("\nUnique Tool Names Used:")
-        if tool_names_used:
-            for name in tool_names_used:
-                print(f"- {name}")
-        else:
-            print("- No tools were used.")
-        print("\nDetailed Tool Interactions:")
+        print("Tool Interactions:", tool_interactions)
         if tool_interactions:
             for i, interaction in enumerate(tool_interactions):
-                print(f"Interaction {i+1}:")
-                print(f"  Name: {interaction.get('tool_name')}")
-                print(f"  Args: {interaction.get('tool_args')}")
-                print("-" * 10)
+                tool_name = interaction.get('tool_name', 'N/A')
+                tool_args = interaction.get('tool_args', {})
+                tool_output = interaction.get('content', 'No output')
+
+                with st.expander(f"🔧 Tool Interaction {i+1}: {tool_name}"):
+                    st.markdown(f"**Tool Name:** {tool_name}")
+                    st.markdown("**Arguments:**")
+                    st.code(json.dumps(tool_args, indent=2), language='json')
+                    st.markdown("**Output:**")
+                    st.code(tool_output, language='json')
+
         else:
-            print("- No tool interactions occurred.")
-        if result.tools: 
-            with st.expander("🔍 Show Tool Interactions"):
-                st.markdown("---") 
-                for i, interaction in enumerate(result.tools):
-                    tool_name = interaction.get('tool_name', 'N/A')
-                    tool_args = interaction.get('tool_args', {})
+            st.write("No tools were used in this interaction.")
 
+        # Display LLM Interactions
+        st.markdown("### LLM Interactions")
+        print("LLM Interactions:", interaction_costs)
+        if interaction_costs:
+            for interaction in interaction_costs:
+                with st.expander(f"🧠 LLM Interaction {interaction['interaction']}"):
+                    st.write(f"**Prompt Tokens:** {interaction['prompt_tokens']}")
+                    st.write(f"**Completion Tokens:** {interaction['completion_tokens']}")
+                    st.write(f"**Cost:** ${interaction['cost']:.6f}")
+                # Display the input (prompt) and output (response) for the interaction
+                    # Display the input (prompt) and output (response) for the interaction
+                    interaction_index = interaction["interaction"] - 1  # Adjust index for zero-based indexing
+                    if hasattr(result, "messages") and len(result.messages) > interaction_index:
+                        llm_message = result.messages[interaction_index]
 
-                    import json
-                    try:
-                        args_str = json.dumps(tool_args, indent=2)
-                    except TypeError: 
-                        args_str = str(tool_args)
+                        # Extract input and output from the message
+                        input_content = (llm_message.content, "No input available") if llm_message.role == "user" else "No input available"
+                        output_content = (llm_message.content, "No output available") if llm_message.role == "assistant" else "No output available"
 
-
-                    st.markdown(f"**Interaction {i+1}: {tool_name}**")
-                    st.code(args_str, language='json')
-                    st.markdown("---") 
-        print(result)
-                # --- Display Cost Per Interaction ---
-        st.markdown("### Cost and Tokens Per Interaction")
-        for interaction in interaction_costs:
-            st.markdown(f"**Interaction {interaction['interaction']}**")
-            st.write(f"Prompt Tokens: {interaction['prompt_tokens']}")
-            st.write(f"Completion Tokens: {interaction['completion_tokens']}")
-            st.write(f"Cost: ${interaction['cost']:.6f}")
-            st.markdown("---")
-
-        st.caption("Note: Cost estimation is based on reported agent model tokens (e.g., GPT-4o-mini) and may exclude costs incurred *inside* custom tools like RAG/Embedding unless explicitly tracked and reported by the tool.")
+                        st.markdown("**Input (Prompt):**")
+                        st.code(input_content, language="text")
+                        st.markdown("**Output (Response):**")
+                        st.code(output_content, language="text")
+        else:
+            st.write("No LLM interactions were recorded.")
+        # Display Total Costs and Tokens
         st.markdown("### Total Tokens and Cost")
         st.write(f"**Total Prompt Tokens:** {total_prompt_tokens}")
         st.write(f"**Total Completion Tokens:** {total_completion_tokens}")
         st.write(f"**Total Cost (USD):** ${total_cost:.6f}")
-        st.markdown("---")
-        st.markdown("---")
-        st.markdown(result.content)
 
-        st.session_state.messages.append({"role": "assistant", "content":result.content })
+        # Include all costs in the final calculation
+        tool_costs = sum(interaction.get('cost', Decimal("0.00")) for interaction in interaction_costs)
+        final_total_cost = total_cost + tool_costs
 
-
-
-
-
-
-
-
-
-
-
+        # Display Final Total Cost
+        st.markdown("### Final Total Cost (Including Tools and LLM)")
+        st.write(f"**Final Total Cost (USD):** ${final_total_cost:.6f}")

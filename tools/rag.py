@@ -25,7 +25,7 @@ load_dotenv()
 
 GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://monika:wOcbxCsRVJIDsphl@crm.hd2v6c5.mongodb.net/?retryWrites=true&w=majority&appName=CRM") # Use env var or default
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://Admin:monikacrm@crm.e2i9tyo.mongodb.net/?retryWrites=true&w=majority&appName=CRM") # Use env var or default
 FAISS_INDEX_PATH = "faiss_metadata_index.pkl"
 METADATA_EMBEDDINGS_COLLECTION = "schema_embeddings_store"
 
@@ -52,7 +52,8 @@ try:
     client = MongoClient(MONGO_URI, server_api=ServerApi('1'))
     client.admin.command('ping')
     print("Successfully connected to MongoDB!")
-    db = client["Demo"]
+    db = client["callCrm"]
+    print("Database selected: callCrm")
 except ConnectionFailure as e:
     print(f"MongoDB Connection Error: {e}")
     raise RuntimeError(f"Could not connect to MongoDB at {MONGO_URI}") from e
@@ -78,8 +79,8 @@ except Exception as e:
 
 class IdentifiedSchema(BaseModel):
     """Structure for the schema details identified by the LLM."""
-    relevant_collection: Optional[str] = Field(
-        None,
+    relevant_collections: List[str] = Field(
+        default_factory=list,
         description="The name of the most relevant MongoDB collection. Null if none found/applicable."
     )
     relevant_fields: List[str] = Field(
@@ -146,6 +147,17 @@ async def upload_json(file: UploadFile = File(..., description="JSON file contai
         print(f"Error in upload_json: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
+def extract_nested_fields(doc, parent_key=""):
+    """Recursively extract nested fields from a document."""
+    fields = []
+    for key, value in doc.items():
+        full_key = f"{parent_key}.{key}" if parent_key else key
+        fields.append(full_key)
+        if isinstance(value, dict):  # If the value is a nested document
+            fields.extend(extract_nested_fields(value, full_key))
+        elif isinstance(value, list) and value and isinstance(value[0], dict):  # If it's a list of nested documents
+            fields.extend(extract_nested_fields(value[0], full_key))
+    return fields
 
 @app.get("/extract_schema", tags=["Schema Management"])
 def extract_schema():
@@ -153,26 +165,26 @@ def extract_schema():
     try:
         collections = db.list_collection_names()
         collections = [c for c in collections if not c.startswith('system.') and c != METADATA_EMBEDDINGS_COLLECTION]
-
+        print(f"Collections found: {collections}")
 
         schema_info = {}
         for collection_name in collections:
-
-
+            print(f"Processing collection: {collection_name}")
             sample_doc = db[collection_name].find_one({}, {"_id": 0})
             if sample_doc:
-                schema_info[collection_name] = list(sample_doc.keys())
+                # Extract fields, including nested fields
+                schema_info[collection_name] = extract_nested_fields(sample_doc)
             else:
+                # If no sample document, extract fields from indexes
                 indexes = db[collection_name].index_information()
                 fields = set()
                 for index_info in indexes.values():
                     for key_tuple in index_info.get('key', []):
                         fields.add(key_tuple[0])
                 schema_info[collection_name] = list(fields) if fields else []
-       
-        if not schema_info:
-             return {"message": "No user collections with data or indexes found to extract schema from."}
 
+        if not schema_info:
+            return {"message": "No user collections with data or indexes found to extract schema from."}
 
         return {
             "message": "Schema extracted successfully",
@@ -182,7 +194,6 @@ def extract_schema():
     except Exception as e:
         print(f"Error in extract_schema: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to extract schema: {str(e)}")
-
 
 
 
@@ -325,6 +336,7 @@ def parse_llm_response(raw_llm_text: str) -> dict:
             cleaned_response_text = cleaned_response_text[:-len("```")].strip()
 
         llm_output_dict = json.loads(cleaned_response_text)
+        
         print("Successfully parsed LLM JSON output.")
         return llm_output_dict
 
@@ -397,38 +409,65 @@ class RagToolkit(Toolkit):
 
             current_date = datetime.now().strftime("%Y-%m-%d")
             prompt = f"""
-            You are an expert MongoDB assistant. Your task is to analyze a user's query and the provided database schema context. First, identify the relevant collection and fields. Then, outline a step-by-step plan (chain of thought) for how you would construct the MongoDB query to answer the user's request using that information.
+                current_date = "{current_date}"
+                You are an expert MongoDB assistant. Your task is to analyze a user's query and the provided database schema context. For both simple and complex queries, follow these steps meticulously to identify the relevant collections and fields, and construct a step-by-step plan (chain of thought) to answer the user's request.
 
-            **Instructions:**
-            1. Analyze Query & Context: Carefully read the "User Query" and examine the "Schema Context" (snippets of MongoDB schema).
-            2. Identify Collection & Fields: Determine the SINGLE most relevant MongoDB collection and the specific fields (for filtering and projection) necessary to answer the query based *only* on the schema context. If it's not possible, explain why in the reasoning.
-            3. Plan Query Construction (Chain of Thought): Based on the User Query and the identified collection/fields, outline the step-by-step logical plan to construct the necessary MongoDB query. Detail the required operations like:
-                * Filtering criteria (e.g., matching agent name, date ranges based on '{current_date}').
-                * Required projections (which fields to return).
-                * Any necessary aggregations (e.g., counting, summing, grouping).
-                * Sorting requirements.
-                * *Do NOT write the actual MongoDB syntax here, just describe the steps.* This plan should be included in the final JSON output under the "chain_of_thought" key.
-            4. Reasoning: Briefly explain *why* the chosen collection and fields are appropriate (linking back to the user query and schema) OR provide the reasoning if the query cannot be answered or planned using the context.
-            5. Output Format: Provide the output *ONLY* in valid JSON format with the following keys: "relevant_collection" (string or null), "relevant_fields" (list of strings), "chain_of_thought" (string describing the query plan steps from instruction 3), and "reasoning" (string).
+                **Instructions:**
+                1. **Analyze Query & Context**:
+                - Carefully read the "User Query" and examine the "Schema Context" (snippets of MongoDB schema).
+                - If the query is complex, break it into smaller sub-queries or logical steps.
 
-            **Constraints:**
-            * Do NOT invent collections or fields not present in the Schema Context.
-            * The chain_of_thought should describe the *plan*, not the final query code.
+                2. **Break Down Complex Queries**:
+                - For each step:
+                    - Identify the specific task (e.g., filtering, aggregation, joining collections).
+                    - Determine the relevant collection(s) and fields required for that step.
+                    - Plan how the results of one step feed into the next step.
 
-            **Current Date:** {current_date}
+                3. **Identify Collections & Fields**:
+                - For each step, determine the relevant MongoDB collections and the specific fields (for filtering and projection) necessary to answer the query based *only* on the schema context.
+                - If it's not possible, explain why in the reasoning.
 
-            **Schema Context:**
-            ```json
-            {context}
-            ```
+                4. **Plan Query Construction (Chain of Thought)**:
+                - Based on the User Query and the identified collections/fields, outline the step-by-step logical plan to construct the necessary MongoDB queries.
+                - Detail the required operations like:
+                    * Filtering criteria (e.g., matching agent name, date ranges based on '{current_date}').
+                    * Required projections (which fields to return).
+                    * Any necessary aggregations (e.g., counting, summing, grouping).
+                    * Sorting requirements.
+                    * Joining collections (if necessary).
+                - *Do NOT write the actual MongoDB syntax here, just describe the steps.* This plan should be included in the final JSON output under the "chain_of_thought" key.
 
-            **User Query:**
-            ```
-            {query}
-            ```
+                5. **Simulate Execution**:
+                - Simulate the execution of the plan step-by-step and describe the expected results at each step.
+                - If the query involves multiple collections or joins, explain how the intermediate results are combined.
 
-            **Output (JSON):**
-            """
+                6. **Reasoning**:
+                - Briefly explain *why* the chosen collections and fields are appropriate (linking back to the user query and schema) OR provide the reasoning if the query cannot be answered or planned using the context.
+
+                7. **Output Format**:
+                - Provide the output *ONLY* in valid JSON format with the following keys:
+                    - "relevant_collections" (list of strings): The names of the relevant MongoDB collections.
+                    - "relevant_fields" (list of strings): A list of fields within the collections needed to answer the query.
+                    - "chain_of_thought" (string): A detailed step-by-step plan describing how to construct and execute the MongoDB queries.
+                    - "reasoning" (string): The reasoning for selecting the collections and fields, or why the query cannot be answered.
+                    - "raw_llm_response" (string): Raw text response from LLM, mainly for debugging JSON parsing issues.
+
+                **Constraints:**
+                * Do NOT invent collections or fields not present in the Schema Context.
+                * The chain_of_thought should describe the *plan*, not the final query code.
+
+                **Current Date:** {current_date}
+
+                **Schema Context:**
+                {context}
+
+                **User Query:**
+                ```
+                {query}
+                ```
+
+                **Output (JSON):**
+                """
             print(f"\n--- Sending Prompt to LLM ---")
             print(f"Context included: {context[:500]}...")
             print("--- End Prompt ---")
@@ -446,7 +485,7 @@ class RagToolkit(Toolkit):
             if not response.parts:
                 print(f"Warning: LLM response was blocked. Feedback: {response.prompt_feedback}")
                 identified_schema_obj = IdentifiedSchema(
-                    relevant_collection=None,
+                    relevant_collections=None,
                     relevant_fields=[],
                     reasoning=f"LLM response blocked due to safety settings. Feedback: {response.prompt_feedback}",
                     raw_llm_response=None
@@ -477,7 +516,7 @@ class RagToolkit(Toolkit):
             except (json.JSONDecodeError, ValidationError) as e:
                 print(f"Error parsing or validating LLM response: {e}")
                 identified_schema_obj = IdentifiedSchema(
-                    relevant_collection=None,
+                    relevant_collections=None,
                     relevant_fields=[],
                     reasoning=f"Failed to parse or validate LLM response: {e}",
                     raw_llm_response=raw_llm_text
@@ -492,7 +531,7 @@ class RagToolkit(Toolkit):
         except Exception as e:
             print(f"Unexpected error in ragcot: {traceback.format_exc()}")
             identified_schema_obj = IdentifiedSchema(
-                relevant_collection=None,
+                relevant_collections=None,
                 relevant_fields=[],
                 reasoning=f"Unexpected error: {str(e)}",
                 raw_llm_response=None
@@ -501,6 +540,8 @@ class RagToolkit(Toolkit):
                 query=query,
                 identified_schema=identified_schema_obj,
                 retrieved_schema_context=[]
+
+                
             )
         
 # rag_toolkit = RagToolkit()
@@ -515,22 +556,22 @@ class RagToolkit(Toolkit):
 #             # model= OpenAIChat(id="gpt-4o-mini",temperature=0),
 
 #             # model=Groq(id="llama-3.1-8b-instant",temperature=0),
-#             tools = [rag_toolkit, MongoDBUtility(uri=uri, db_name="Demo")],
+#             tools = [rag_toolkit, MongoDBUtility(uri=uri, db_name="callCrm")],
 #             instructions="""You are an intelligent MongoDB assistant that dynamically constructs and executes queries based on user input. Follow these steps METICULOUSLY:
 
 
 #             1️⃣ **Schema Identification & Planning (MUST DO FIRST):**
 #                - Immediately use the `rag_toolkit` with the original user query.
-#                - **Wait for the output** from `rag_toolkit`. It will be a JSON string containing keys like `relevant_collection`, `relevant_fields`, `chain_of_thought`, and `reasoning`.
+#                - **Wait for the output** from `rag_toolkit`. It will be a JSON string containing keys like `relevant_collections`, `relevant_fields`, `chain_of_thought`, and `reasoning`.
 #                - **Parse this JSON output.**
 #                - **CRITICAL:** Extract the `chain_of_thought` from the RAG tool's output. This is your **mandatory plan** for the subsequent steps.
-#                - Also extract the `relevant_collection` and `relevant_fields` also use `get_collection_schema` to get the datatypes of each fields as well.
-#                - If the RAG tool returns an error, or if `relevant_collection` or `chain_of_thought` is null/missing, state that you cannot proceed with planning the query due to missing schema information or RAG tool failure, explain the reason given in the 'reasoning' or 'error' field, and STOP.
+#                - Also extract the `relevant_collections` and `relevant_fields` also use `get_collection_schema` to get the datatypes of each fields as well.
+#                - If the RAG tool returns an error, or if `relevant_collections` or `chain_of_thought` is null/missing, state that you cannot proceed with planning the query due to missing schema information or RAG tool failure, explain the reason given in the 'reasoning' or 'error' field, and STOP.
 
 
 #             2️⃣ **Generate an Optimized Query (Based STRICTLY on RAG Plan):**
 #                - **Follow the step-by-step `chain_of_thought`** provided by the `rag_toolkit` in Step 1 to construct the specific MongoDB query (or aggregation pipeline).
-#                - Use the `relevant_collection` from `identified in Step 1.
+#                - Use the `relevant_collections` from `identified in Step 1.
 #                - Implement filtering logic (`$eq`, `$gte`, `$regex`, etc.) exactly as described in the `chain_of_thought`.
 #                - Project *only* the `relevant_fields` identified in Step 1 (plus any other fields explicitly required by the `chain_of_thought` for filtering, aggregation, or sorting), avoiding `_id` unless specified in the plan or required.
 #                - If the `chain_of_thought` indicates aggregation, construct the aggregation pipeline as outlined.
@@ -572,7 +613,7 @@ class RagToolkit(Toolkit):
 
 #             *Initial thought process for "List failed calls last week":*
 #             1. Call `RagToolkit` with "List failed calls last week".
-#             2. RAG Output (example): `{"relevant_collection": "calls", "relevant_fields": ["caller", "receiver", "timestamp", "status"], "chain_of_thought": "1. Filter 'calls' collection by status='failed'. 2. Filter by timestamp >= <start_of_last_week>. 3. Project caller, receiver, timestamp, status.", "reasoning": "Query asks for failed calls, schema has status and timestamp."}`
+#             2. RAG Output (example): `{"relevant_collections": "calls", "relevant_fields": ["caller", "receiver", "timestamp", "status"], "chain_of_thought": "1. Filter 'calls' collection by status='failed'. 2. Filter by timestamp >= <start_of_last_week>. 3. Project caller, receiver, timestamp, status.", "reasoning": "Query asks for failed calls, schema has status and timestamp."}`
 #             3. Follow `chain_of_thought`: Build query `{"status": "failed", "timestamp": {"$gte": <date>}}` for collection `calls` with projection `{caller: 1, receiver: 1, timestamp: 1, status: 1, _id: 0}`.
 #             4. Plan indicates retrieving documents -> Use `FindDocumentsTool`.
 #             5. Execute `FindDocumentsTool` with the built query.
@@ -598,7 +639,7 @@ class RagToolkit(Toolkit):
         #         if not response.parts:
         #             print(f"Warning: LLM response was blocked. Feedback: {response.prompt_feedback}")
         #             identified_schema_obj = IdentifiedSchema(
-        #                 relevant_collection=None,
+        #                 relevant_collections=None,
         #                 relevant_fields=[],
         #                 reasoning=f"LLM response blocked due to safety settings. Feedback: {response.prompt_feedback}",
         #                 raw_llm_response=None
@@ -644,7 +685,7 @@ class RagToolkit(Toolkit):
         #             except ValidationError as val_err:
         #                 print(f"Pydantic Validation Error: {val_err}")
         #                 identified_schema_obj = IdentifiedSchema(
-        #                     relevant_collection=llm_output_dict.get("relevant_collection"),
+        #                     relevant_collections=llm_output_dict.get("relevant_collections"),
         #                     relevant_fields=llm_output_dict.get("relevant_fields", []),
         #                     reasoning=f"LLM response parsed as JSON, but failed Pydantic validation: {val_err}. Raw JSON tried: {cleaned_response_text}",
         #                     raw_llm_response=raw_llm_text
@@ -652,7 +693,7 @@ class RagToolkit(Toolkit):
         #         except (json.JSONDecodeError, AttributeError) as json_err:
         #             print(f"Warning: LLM response was not valid JSON: {json_err}")
         #             identified_schema_obj = IdentifiedSchema(
-        #                 relevant_collection=None,
+        #                 relevant_collections=None,
         #                 relevant_fields=[],
         #                 reasoning=f"LLM did not provide valid JSON output. Error: {json_err}. Raw text: {raw_llm_text}",
         #                 raw_llm_response=raw_llm_text
@@ -662,7 +703,7 @@ class RagToolkit(Toolkit):
         #     except Exception as gen_err:
         #         print(f"Error during LLM content generation or processing: {traceback.format_exc()}")
         #         identified_schema_obj = IdentifiedSchema(
-        #             relevant_collection=None,
+        #             relevant_collections=None,
         #             relevant_fields=[],
         #             reasoning=f"LLM content generation or processing failed: {str(gen_err)}",
         #             raw_llm_response=None
@@ -815,7 +856,7 @@ class RagToolkit(Toolkit):
 #                 *   Sorting requirements.
 #                 *   *Do NOT write the actual MongoDB syntax here, just describe the steps.* This plan should be included in the final JSON output under the "chain_of_thought" key.
 #             4.  **Reasoning:** Briefly explain *why* the chosen collection and fields are appropriate (linking back to the user query and schema) OR provide the reasoning if the query cannot be answered or planned using the context.
-#             5.  **Output Format:** Provide the output *ONLY* in valid JSON format with the following keys: "relevant_collection" (string or null), "relevant_fields" (list of strings), "chain_of_thought" (string describing the query plan steps from instruction 3), and "reasoning" (string).
+#             5.  **Output Format:** Provide the output *ONLY* in valid JSON format with the following keys: "relevant_collections" (string or null), "relevant_fields" (list of strings), "chain_of_thought" (string describing the query plan steps from instruction 3), and "reasoning" (string).
 
 
 #             **Constraints:**
@@ -856,7 +897,7 @@ class RagToolkit(Toolkit):
 #                     print(f"SchemaRAGTool: Warning: LLM response was blocked. Feedback: {feedback}")
 #                     # Return a structured error message
 #                     error_output = {
-#                         "relevant_collection": None,
+#                         "relevant_collections": None,
 #                         "relevant_fields": [],
 #                         "chain_of_thought": None,
 #                         "reasoning": f"LLM response blocked. Cannot plan query. Feedback: {feedback}",
@@ -893,7 +934,7 @@ class RagToolkit(Toolkit):
 #                         if "relevant_fields" in llm_output_dict and llm_output_dict["relevant_fields"] is None:
 #                             llm_output_dict["relevant_fields"] = []
 #                         # Ensure all required fields for the tool's purpose are present
-#                         if "relevant_collection" not in llm_output_dict: llm_output_dict["relevant_collection"] = None
+#                         if "relevant_collections" not in llm_output_dict: llm_output_dict["relevant_collections"] = None
 #                         if "chain_of_thought" not in llm_output_dict: llm_output_dict["chain_of_thought"] = None
 #                         if "reasoning" not in llm_output_dict: llm_output_dict["reasoning"] = "N/A"
 
@@ -910,7 +951,7 @@ class RagToolkit(Toolkit):
 #                         print(f"SchemaRAGTool: Pydantic Validation Error: {val_err}")
 #                         # Return structured error with details
 #                         error_output = {
-#                             "relevant_collection": llm_output_dict.get("relevant_collection"),
+#                             "relevant_collections": llm_output_dict.get("relevant_collections"),
 #                             "relevant_fields": llm_output_dict.get("relevant_fields", []),
 #                             "chain_of_thought": llm_output_dict.get("chain_of_thought"),
 #                             "reasoning": f"LLM response parsed, but failed validation: {val_err}. Raw JSON tried: {cleaned_response_text}",
@@ -923,7 +964,7 @@ class RagToolkit(Toolkit):
 #                     print(f"SchemaRAGTool: Warning: LLM response was not valid JSON: {json_err}")
 #                      # Return structured error
 #                     error_output = {
-#                         "relevant_collection": None,
+#                         "relevant_collections": None,
 #                         "relevant_fields": [],
 #                         "chain_of_thought": None,
 #                         "reasoning": f"LLM did not provide valid JSON output. Error: {json_err}. Raw text: {raw_llm_text}",
@@ -936,7 +977,7 @@ class RagToolkit(Toolkit):
 #                 print(f"SchemaRAGTool: Error during LLM generation/processing: {traceback.format_exc()}")
 #                 # Return structured error
 #                 error_output = {
-#                     "relevant_collection": None,
+#                     "relevant_collections": None,
 #                     "relevant_fields": [],
 #                     "chain_of_thought": None,
 #                     "reasoning": f"LLM content generation or processing failed: {str(gen_err)}",

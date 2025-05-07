@@ -55,6 +55,7 @@ class MongoDBUtility(Toolkit):
         self.register(self.count_documents)
         self.register(self.find_documents)
         self.register(self.aggregate_documents)
+        self.register(self.validate_query_or_pipeline)
 
     def query_mongodb(self, collection: str, filter_query: Optional[Dict] = None, projection: Optional[Dict] = None) -> List[Dict]:
         """Executes a MongoDB find() query."""
@@ -90,9 +91,30 @@ class MongoDBUtility(Toolkit):
         col = self.db[collection]
         cursor = col.find(filter_query or {}, projection)
         return list(cursor)
-
+    def validate_query_or_pipeline(query_or_pipeline):
+        """Validate the MongoDB query or aggregation pipeline."""
+        if isinstance(query_or_pipeline, dict):
+            # Validate query
+            print(f"Validated Query: {query_or_pipeline}")
+        elif isinstance(query_or_pipeline, list):
+            # Validate aggregation pipeline
+            if not query_or_pipeline:
+                raise ValueError("Aggregation pipeline cannot be empty.")
+            print(f"Validated Pipeline: {query_or_pipeline}")
+        else:
+            raise TypeError(f"Invalid input type: {type(query_or_pipeline).__name__}. Must be a dictionary or a list.")
     def aggregate_documents(self, collection: str, pipeline: List[Dict]) -> List[Dict]:
         """Runs an aggregation pipeline on a MongoDB collection."""
-        col = self.db[collection]
-        return list(col.aggregate(pipeline))
+        if not isinstance(pipeline, list):
+            raise TypeError("Pipeline must be a list of dictionaries.")
+        if not pipeline:
+            raise ValueError("Pipeline cannot be empty.")
+
+        print(f"Running aggregation on collection: {collection}, pipeline: {pipeline}")
+        try:
+            col = self.db[collection]
+            return list(col.aggregate(pipeline))
+        except Exception as e:
+            print(f"Error running aggregation on collection '{collection}': {e}")
+            raise
     
